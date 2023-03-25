@@ -1,2 +1,2 @@
-# delta_test_bnc
-Time series model
+# Time series modelling 
+Basic time series linear model
