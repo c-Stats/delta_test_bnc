@@ -77,7 +77,8 @@ def timeseries_model(
     t_freq = freq * (t[1] - t[0])
     x_seasonality = 1 + np.sin(t * 2 * math.pi / t_freq)
 
-    if freq <= len(t) / 2:
+    has_lag = freq <= len(t) / 2 and t_freq >= 1
+    if has_lag:
 
         y_final = y[freq:]
         y_lag = y[: (len(y) - freq)]
@@ -106,13 +107,13 @@ def timeseries_model(
         ) 
 
     else:
-        X = np.vstack([np.ones(len(t)), t, x_seasonality]).T
-        coefs = np.append(np.linalg.lstsq(X, y, rcond=None)[0], 0)
+        X = np.vstack([np.ones(len(t)), t]).T
+        coefs = np.append(np.linalg.lstsq(X, y, rcond=None)[0], np.array([0, 0]))
 
-        fitted_val = coefs[0] + coefs[1] * t + coefs[2] * x_seasonality
+        fitted_val = coefs[0] + coefs[1] * t
         residuals = y - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y), 2)
-        E_last_y = coefs[0] + coefs[1] * last_t + coefs[2] * (1 + np.sin(last_t * 2 * math.pi / t_freq))
+        E_last_y = coefs[0] + coefs[1] * last_t
 
     rmse = math.sqrt(np.mean(residuals**2))
     z_score = (last_y - E_last_y)/rmse
@@ -120,13 +121,17 @@ def timeseries_model(
     CI = np.round(np.array([-1, 1])*scipy.stats.norm.ppf(1-alpha/2)*rmse + E_last_y, 4)
     test_result = "FAIL" if p_val <= alpha else "PASS"
 
+    sin_term = lag_term = np.round(coefs[2], 4) if has_lag else "NULL"
+    lag_term = np.round(coefs[3], 4) if has_lag else "NULL"
+    lag_value = t_freq if has_lag else "NULL"
+
     print("------ DELTA TIMESERIES TEST RESULT ------")
     print(f"Model r-squared: {r_squared}")
     print("***")
     print(f"Daily trend: {np.round(coefs[1], 4)}")
-    print(f"Sinusoidal term: {np.round(coefs[2], 4)}")
-    print(f"Lag term: {np.round(coefs[3], 4)}")
-    print(f"Lag (days): {np.round(t_freq, 4)}")
+    print(f"Sinusoidal term: {sin_term}")
+    print(f"Lag term: {lag_term}")
+    print(f"Lag (days): {lag_value}")
     print("***")
     print(f"Test alpha: {alpha}")
     print(f"Observed volume: {last_y}")
