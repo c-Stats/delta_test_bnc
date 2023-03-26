@@ -131,7 +131,7 @@ def timeseries_model(
     print(f"Test alpha: {alpha}")
     print(f"Observed volume: {last_y}")
     print(f"Expected volume: {np.round(E_last_y, 4)}")
-    print(f"{1-alpha} CI: {CI}")
+    print(f"{1-alpha} CI: ({CI[0]}, {CI[1]})")
     print(f"p-value: {p_val}")
     print(f"Result: {test_result}")
     print("------------------------------------------")
