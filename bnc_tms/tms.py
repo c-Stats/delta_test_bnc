@@ -97,7 +97,7 @@ def timeseries_model(
         residuals = y_final - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
 
-        last_y_lag = np.interp(last_t - t_freq, axes["t"], axes["y"])
+        last_y_lag = np.interp(last_t - t_freq, t, y)
 
         E_last_y = (
             coefs[0]
