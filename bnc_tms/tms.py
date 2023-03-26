@@ -154,8 +154,8 @@ def timeseries_model(
             4,
         )
 
-    sin_term = np.round(coefs[2], 4) if has_lag else "NULL"
-    lag_term = np.round(coefs[3], 4) if has_lag else "NULL"
+    sin_term = np.round(coefs[2], 4) if coefs[2] != 0 else "NULL"
+    lag_term = np.round(coefs[3], 4) if coefs[3] != 0 else "NULL"
     lag_value = np.round(t_freq / (24 * 60), 4) if has_lag else "NULL"
     test_result = "FAIL" if p_val <= alpha else "PASS"
     cdf_type = "Gaussian" if not use_empirical_residuals_pdf else "Empirical"
