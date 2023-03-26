@@ -65,8 +65,8 @@ def timeseries_model(
 
     last_t = t[-1]
     last_y = y[-1]
-    t = t[:-1]
-    y = y[:-1]
+    t = t[:-2]
+    y = y[:-2]
 
     X = np.vstack([np.ones(len(t)), t]).T
     c, b = np.linalg.lstsq(X, y, rcond=None)[0]
@@ -74,7 +74,8 @@ def timeseries_model(
 
     acf = np.correlate(y_detrend, y_detrend, "full")[-len(y_detrend) :]
     freq = np.flip(np.argsort(acf))[1]
-    x_seasonality = 1 + np.sin(t * 2 * math.pi / freq)
+    t_freq = freq * (t[1] - t[0])
+    x_seasonality = 1 + np.sin(t * 2 * math.pi / t_freq)
 
     if freq <= len(t) / 2:
 
@@ -94,11 +95,14 @@ def timeseries_model(
         )
         residuals = y_final - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
+
+        last_y_lag = np.interp(last_t - t_freq, axes["t"], axes["y"])
+
         E_last_y = (
             coefs[0]
             + coefs[1] * last_t
-            + coefs[2] * (1 + np.sin(last_t * 2 * math.pi / freq))
-            + coefs[3] * y[-freq]
+            + coefs[2] * (1 + np.sin(last_t * 2 * math.pi / t_freq))
+            + coefs[3] * last_y_lag
         ) 
 
     else:
@@ -108,7 +112,7 @@ def timeseries_model(
         fitted_val = coefs[0] + coefs[1] * t + coefs[2] * x_seasonality
         residuals = y - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y), 2)
-        E_last_y = coefs[0] + coefs[1] * last_t + coefs[2] * (1 + np.sin(last_t * 2 * math.pi / freq))
+        E_last_y = coefs[0] + coefs[1] * last_t + coefs[2] * (1 + np.sin(last_t * 2 * math.pi / t_freq))
 
     rmse = math.sqrt(np.mean(residuals**2))
     z_score = (last_y - E_last_y)/rmse
@@ -118,6 +122,12 @@ def timeseries_model(
 
     print("------ DELTA TIMESERIES TEST RESULT ------")
     print(f"Model r-squared: {r_squared}")
+    print("***")
+    print(f"Daily trend: {np.round(coefs[1], 4)}")
+    print(f"Sinusoidal term: {np.round(coefs[2], 4)}")
+    print(f"Lag term: {np.round(coefs[3], 4)}")
+    print(f"Lag (days): {np.round(t_freq, 4)}")
+    print("***")
     print(f"Test alpha: {alpha}")
     print(f"Observed volume: {last_y}")
     print(f"Expected volume: {np.round(E_last_y, 4)}")
@@ -131,7 +141,7 @@ def timeseries_model(
         "coefs": coefs,
         "r_squared": r_squared,
         "rmse": rmse,
-        "freq": freq * (t[1] - t[0]),
+        "freq": t_freq,
         "has_lag": freq <= len(t) / 2,
         "z_score": z_score,
         "p_value" : p_val,
