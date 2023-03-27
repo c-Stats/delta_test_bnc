@@ -91,9 +91,6 @@ def timeseries_model(
     freq = np.flip(np.argsort(acf))[1]
     t_freq = freq * (t[1] - t[0])
 
-    # Seasonality component for the sinusoidal term
-    x_seasonality = 1 + np.sin(t * 2 * math.pi / t_freq)
-
     # Check if lag is reasonable
     has_lag = freq <= len(t) / 2
 
@@ -101,40 +98,43 @@ def timeseries_model(
     # Model with lag terms
     if has_lag:
         # Values for model with lag and sinunoidal term
-        y_final = y[freq:]
-        y_lag = y[: (len(y) - freq)]
-        t_final = t[freq:]
-        x_seasonality_final = x_seasonality[freq:]
+        index = np.where(axes["t"] >= t_freq)[0]
+        y_final = axes["y"][index][:-1]
+        t_final = axes["t"][index][:-1]
+        y_lag = np.interp(t_final - t_freq, axes["t"][:-1], axes["y"][:-1])
 
-        X = np.vstack([np.ones(len(t_final)), t_final, x_seasonality_final, y_lag]).T
-        lasso = linear_model.LassoCV(cv=50, random_state=0).fit(X, y_final)
+        X = np.vstack([np.ones(len(t_final)), t_final, y_lag]).T
+        lasso = linear_model.LassoCV(cv=5, random_state=0).fit(X, y_final)
 
         fitted_val = lasso.predict(X)
         residuals = y_final - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
 
-        last_y_lag = np.interp(last_t - t_freq, t, y)
+        last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
         E_last_y = lasso.predict(
             np.array(
-                [1, last_t, (1 + np.sin(last_t * 2 * math.pi / t_freq)), last_y_lag]
+                [1, last_t, last_y_lag]
             ).reshape(1, -1)
         )[0]
 
         # If lag terms are insignificant, then act as if there is no seasonality
         coefs = lasso.coef_
-        has_lag = has_lag and not (coefs[2] == coefs[3] == 0)
+        has_lag = has_lag and not coefs[2] == 0
 
     # Model with no seasonality
     if not has_lag:
-        X = np.vstack([np.ones(len(t)), t]).T
-        lasso = linear_model.LassoCV(cv=50, random_state=0).fit(X, y)
-        coefs = np.append(lasso.coef_, np.array([0, 0]))
+        y_final = axes["y"][:-1]
+        t_final = axes["t"][:-1]
+
+        X = np.vstack([np.ones(len(t_final)), t_final]).T
+        lasso = linear_model.LassoCV(cv=5, random_state=0).fit(X, y_final)
+        coefs = np.append(lasso.coef_, np.array([0]))
 
         fitted_val = lasso.predict(X)
-        residuals = y - fitted_val
+        residuals = y_final - fitted_val
         r_squared = np.round(np.var(fitted_val) / np.var(y), 2)
 
-        last_y_lag = np.interp(last_t - t_freq, t, y)
+        last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
         E_last_y = lasso.predict(np.array([1, last_t]).reshape(1, -1))[0]
 
     if not use_empirical_residuals_pdf:
@@ -145,25 +145,25 @@ def timeseries_model(
             np.array([-1, 1]) * scipy.stats.norm.ppf(1 - alpha / 2) * rmse + E_last_y, 4
         )
     else:
+        rmse = math.sqrt(np.mean(residuals**2))
         residue = last_y - E_last_y
         cdf_val = sum(1 if x >= residue else 0 for x in residuals) / len(residuals)
-        p_val = np.round(cdf_val * 2 if cdf_val <= 0.5 else 2 * (1 - cdf_val), 4)
+        p_val = np.round(2 * min([cdf_val, 1-cdf_val]), 4)
         CI = np.round(
             scipy.stats.mstats.mquantiles((residuals), [alpha / 2, 1 - alpha / 2])
             + E_last_y,
             4,
         )
 
-    sin_term = np.round(coefs[2], 4) if coefs[2] != 0 else "NULL"
-    lag_term = np.round(coefs[3], 4) if coefs[3] != 0 else "NULL"
+    trend_term = np.round(coefs[1]*(24*60), 4) if coefs[1] !=0 else "NULL"
+    lag_term = np.round(coefs[2], 4) if coefs[2] != 0 else "NULL"
     lag_value = np.round(t_freq / (24 * 60), 4) if has_lag else "NULL"
     test_result = "FAIL" if p_val <= alpha else "PASS"
     cdf_type = "Gaussian" if not use_empirical_residuals_pdf else "Empirical"
 
     print("------ DELTA TIMESERIES TEST RESULT ------")
     print(f"Model r-squared: {r_squared}")
-    print(f"Daily trend: {np.round(coefs[1]*(24*60), 4)}")
-    print(f"Sinusoidal term: {sin_term}")
+    print(f"Daily trend: {trend_term}")
     print(f"Y lagged term: {lag_term}")
     print(f"Lag (days): {lag_value}")
     print("*****")
