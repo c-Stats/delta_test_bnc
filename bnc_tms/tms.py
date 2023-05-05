@@ -1,11 +1,55 @@
 """tms module"""
 
-import math
-import scipy
-import numpy as np
 import pandas as pd
-from sklearn import linear_model
-from typing import Dict, Union, Any
+import numpy as np
+import scipy
+import math
+from numpy import ndarray
+from scipy.optimize import minimize
+from typing import Dict, Union, Any, List
+import statistics
+
+
+def smape(y_pred: List[float], y_true: List[float], return_residuals: bool = False) -> float:
+    """"Symetric mape.
+    
+    Args:
+        y_pred: prediction
+        y_true: truth
+        return_residuals: return residuals
+
+    Returns:
+        smape
+    
+    """
+    index = [i for i,x in enumerate(y_true) if x != 0]
+    yp = np.array(y_pred)[index]
+    yt = np.array(y_true)[index]
+
+    mape_1 = abs(yp - yt) / abs(yt)
+    mape_2 = abs(yp - yt) / abs(yt)
+
+    mape = 100 * np.array([max([x, y]) for (x,y) in zip(mape_1, mape_2)])    
+    if return_residuals:
+        return mape
+
+    return statistics.mean(mape)
+
+
+def loss(beta: ndarray, X: ndarray, Y: ndarray) -> float:
+    """"Compute the loss for a linear model.
+    
+    Args:
+        beta: beta
+        X: independent variables
+        y: dependent variables
+
+    Returns:
+        the loss
+    
+    """
+    y_pred = np.matmul(X, beta)
+    return smape(y_pred, Y)
 
 
 def extract_axes(
@@ -66,6 +110,8 @@ def timeseries_model(
     if not axes:
         return None
     
+    axes = extract_axes(tms_df, date_col, value_col)
+
     last_t = axes["t"][-1]
     last_y = axes["y"][-1]
 
@@ -88,103 +134,89 @@ def timeseries_model(
     acf = np.correlate(y_detrend_cs, y_detrend_cs, "full")[-len(y_detrend) :] / len(
         y_detrend
     )
-    freq = np.flip(np.argsort(acf))[1]
+
+    all_freq = np.flip(np.argsort(acf))[1:]
+    max_freq = len(t) / 2
+    for i in range(0, len(all_freq)):
+        freq = all_freq[i]
+        if freq < max_freq:
+            break
+
     t_freq = freq * (t[1] - t[0])
 
-    # Check if lag is reasonable
-    has_lag = freq <= len(t) / 2
+    # Values for model with lag 
+    index = np.where(axes["t"] >= t_freq)[0]
+    y_final = axes["y"][index][:-1]
+    t_final = axes["t"][index][:-1]
+    y_lag = np.interp(t_final - t_freq, axes["t"][:-1], axes["y"][:-1])
 
-    # Lasso regression
-    # Model with lag terms
-    if has_lag:
-        # Values for model with lag and sinunoidal term
-        index = np.where(axes["t"] >= t_freq)[0]
-        y_final = axes["y"][index][:-1]
-        t_final = axes["t"][index][:-1]
-        y_lag = np.interp(t_final - t_freq, axes["t"][:-1], axes["y"][:-1])
+    X = np.vstack([np.ones(len(t_final)), t_final, y_lag]).T
+    Y = y_final
 
-        X = np.vstack([np.ones(len(t_final)), t_final, y_lag]).T
-        lasso = linear_model.LassoCV(cv=5, random_state=0).fit(X, y_final)
+    beta_init = np.array([0]*X.shape[1])
+    beta_init[0] = statistics.mean(y_final)
 
-        fitted_val = lasso.predict(X)
-        residuals = y_final - fitted_val
-        r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
+    result = minimize(loss, beta_init, args=(X, Y), method = 'BFGS', options = {'maxiter': 500})
+    coefs = result.x
 
-        last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
-        E_last_y = lasso.predict(
-            np.array(
-                [1, last_t, last_y_lag]
-            ).reshape(1, -1)
-        )[0]
+    fitted_val = np.matmul(X, np.array(coefs))
+    residuals = y_final - fitted_val
+    r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
 
-        # If lag terms are insignificant, then act as if there is no seasonality
-        coefs = lasso.coef_
-        has_lag = has_lag and not coefs[2] == 0
+    last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
+    E_last_y = float(np.matmul(np.array([1, last_t, last_y_lag]).reshape(1, -1), coefs)[0])
+    delta = E_last_y - last_y
 
-    # Model with no seasonality
-    if not has_lag:
-        y_final = axes["y"][:-1]
-        t_final = axes["t"][:-1]
+    residuals_smape = 1 + smape(fitted_val, y_final, True)
+    last_y_smape = 1 + float(smape([E_last_y], [last_y], True)[0])
 
-        X = np.vstack([np.ones(len(t_final)), t_final]).T
-        lasso = linear_model.LassoCV(cv=5, random_state=0).fit(X, y_final)
-        coefs = np.append(lasso.coef_, np.array([0]))
+    r_smape_logval = np.array([math.log(x) for x in residuals_smape])
+    theta = statistics.mean(residuals_smape * r_smape_logval) + statistics.mean(residuals_smape) * statistics.mean(r_smape_logval)
+    k = statistics.mean(residuals_smape)/theta
 
-        fitted_val = lasso.predict(X)
-        residuals = y_final - fitted_val
-        r_squared = np.round(np.var(fitted_val) / np.var(y), 2)
+    n = len(residuals_smape)
+    theta = (n / (n - 1)) * theta
+    k = k - (1/n)*(3*k - (2/3)*(k/(1+k) - (4/5)*(k/(1+k)**2)))
 
-        last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
-        E_last_y = lasso.predict(np.array([1, last_t]).reshape(1, -1))[0]
+    cdf_value = scipy.stats.gamma.cdf(last_y_smape, k, scale = theta)
+    p_val = round(2*min([cdf_value, 1-cdf_value]), 4)
 
-    if not use_empirical_residuals_pdf:
-        rmse = math.sqrt(np.mean(residuals**2))
-        z_score = (last_y - E_last_y) / rmse
-        p_val = np.round(scipy.stats.norm.sf(abs(z_score)) * 2, 4)
-        CI = np.round(
-            np.array([-1, 1]) * scipy.stats.norm.ppf(1 - alpha / 2) * rmse + E_last_y, 4
-        )
-    else:
-        rmse = math.sqrt(np.mean(residuals**2))
-        residue = last_y - E_last_y
-        cdf_val = sum(1 if x >= residue else 0 for x in residuals) / len(residuals)
-        p_val = np.round(2 * min([cdf_val, 1-cdf_val]), 4)
-        CI = np.round(
-            scipy.stats.mstats.mquantiles((residuals), [alpha / 2, 1 - alpha / 2])
-            + E_last_y,
-            4,
-        )
+    res_pred_cor = round(scipy.stats.pearsonr(fitted_val, residuals)[0], 2)
 
-    trend_term = np.round(coefs[1]*(24*60), 4) if coefs[1] !=0 else "NULL"
-    lag_term = np.round(coefs[2], 4) if coefs[2] != 0 else "NULL"
-    lag_value = np.round(t_freq / (24 * 60), 4) if has_lag else "NULL"
+    baseline = round(coefs[0])
+    trend_term = round(coefs[1]*(24*60))
+    lag_term = round(coefs[2], 4)
+    lag_value = np.round(t_freq / (24 * 60), 2) 
     test_result = "FAIL" if p_val <= alpha else "PASS"
-    cdf_type = "Gaussian" if not use_empirical_residuals_pdf else "Empirical"
+    residuals_distribution = {"type": "Gamma", "shape": round(k, 4), "scale": round(theta, 4)}
+
+    last_y = round(last_y)
+    E_last_y = round(E_last_y)
 
     print("------ DELTA TIMESERIES TEST RESULT ------")
     print(f"Model r-squared: {r_squared}")
+    print(f"Correlation between residuals and fitted values: {res_pred_cor}")
+    print(f"Baseline: {baseline}")
     print(f"Daily trend: {trend_term}")
     print(f"Y lagged term: {lag_term}")
     print(f"Lag (days): {lag_value}")
     print("*****")
-    print(f"Test alpha: {alpha}")
-    print(f"Residuals distribution: {cdf_type}")
+    print(f"Symmetric MAPE+1 residuals distribution: {residuals_distribution}")
     print(f"Observed volume: {last_y}")
-    print(f"Expected volume: {np.round(E_last_y, 4)}")
-    print(f"{1-alpha} CI: ({CI[0]}, {CI[1]})")
+    print(f"Expected volume: {E_last_y}")
     print(f"p-value: {p_val}")
+    print(f"Test alpha: {alpha}")
     print(f"Result: {test_result}")
-    print("------------------------------------------")
+    print("------------------------------------------")    
 
     return {
-        "coefs": coefs,
+        "coefs": {"baseline": baseline, "daily_trend": trend_term, "lagged_value": lag_term},
+        "lag_(days)": lag_value,
         "r_squared": r_squared,
-        "rmse": rmse,
-        "freq": t_freq,
-        "has_lag": has_lag,
+        "fitted_val_and_residuals_correlation": res_pred_cor,
+        "volume": {"observed": last_y, "expected": E_last_y, "delta": delta, "mape": round(delta / last_y, 4)},
         "p_value": p_val,
-        "CI": CI,
         "test_result": test_result,
         "alpha": alpha,
-        "use_empirical_residuals_pdf": use_empirical_residuals_pdf,
+        "symmetric_mape+1_residuals_distribution": residuals_distribution,
     }
