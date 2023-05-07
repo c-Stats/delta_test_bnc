@@ -3,53 +3,9 @@
 import pandas as pd
 import numpy as np
 import scipy
-import math
-from numpy import ndarray
-from scipy.optimize import minimize
-from typing import Dict, Union, Any, List
+from typing import Dict, Union, Any
 import statistics
-
-
-def smape(y_pred: List[float], y_true: List[float], return_residuals: bool = False) -> float:
-    """"Symetric mape.
-    
-    Args:
-        y_pred: prediction
-        y_true: truth
-        return_residuals: return residuals
-
-    Returns:
-        smape
-    
-    """
-    index = [i for i,x in enumerate(y_true) if x != 0]
-    yp = np.array(y_pred)[index]
-    yt = np.array(y_true)[index]
-
-    mape_1 = abs(yp - yt) / abs(yt)
-    mape_2 = abs(yp - yt) / abs(yt)
-
-    mape = 100 * np.array([max([x, y]) for (x,y) in zip(mape_1, mape_2)])    
-    if return_residuals:
-        return mape
-
-    return statistics.mean(mape)
-
-
-def loss(beta: ndarray, X: ndarray, Y: ndarray) -> float:
-    """"Compute the loss for a linear model.
-    
-    Args:
-        beta: beta
-        X: independent variables
-        y: dependent variables
-
-    Returns:
-        the loss
-    
-    """
-    y_pred = np.matmul(X, beta)
-    return smape(y_pred, Y)
+from sklearn.model_selection import KFold
 
 
 def extract_axes(
@@ -83,7 +39,7 @@ def extract_axes(
         return None
 
     y = np.array(tms_df[value_col])
-    return {"t": t, "y": y, "y_start": min_date}
+    return {"t": t, "y": y, "y_start": min_date, "y_day": [d.weekday() for d in tms_df[date_col].to_list()]}
 
 
 def timeseries_model(
@@ -91,7 +47,6 @@ def timeseries_model(
     date_col: str = "Date",
     value_col: str = "Rows",
     alpha: float = 0.05,
-    use_empirical_residuals_pdf: bool = False,
 ) -> Union[Dict[str, Any], None]:  # pylint: disable=R0914
     """Returns the model of type a + b*t + c*sin(phi*t) + d*y_lag.
 
@@ -110,8 +65,6 @@ def timeseries_model(
     if not axes:
         return None
     
-    axes = extract_axes(tms_df, date_col, value_col)
-
     last_t = axes["t"][-1]
     last_y = axes["y"][-1]
 
@@ -148,75 +101,121 @@ def timeseries_model(
     index = np.where(axes["t"] >= t_freq)[0]
     y_final = axes["y"][index][:-1]
     t_final = axes["t"][index][:-1]
+    weekday_final = np.array(axes["y_day"])[index][:-1]
     y_lag = np.interp(t_final - t_freq, axes["t"][:-1], axes["y"][:-1])
 
-    X = np.vstack([np.ones(len(t_final)), t_final, y_lag]).T
+    # Check p-value of correlation
+    lag_cor_val, lag_cor_pval = scipy.stats.pearsonr(y_final, y_lag)
+    lag_cor_pval = round(lag_cor_pval, 4)
+
+    # Intercepts for each day present in the dataset
+    unique_weekdays = list(set(weekday_final))
+    unique_weekdays.sort()
+    n_unique_weekdays = len(unique_weekdays)
+
+    weekday_intercepts = [np.zeros(len(t_final)) for i in range(0, n_unique_weekdays)]
+    for i in range(0, len(weekday_final)):
+        weekday = weekday_final[i]
+        j = unique_weekdays.index(weekday)
+        weekday_intercepts[j][i] = 1
+
+    X = np.vstack([np.ones(len(t_final))] + weekday_intercepts + [t_final, y_lag]).T
     Y = y_final
+    # Check p-value of correlation (y_lagged)
+    cor_val, cor_pval = scipy.stats.pearsonr(y_final, y_lag)
 
-    beta_init = np.array([0]*X.shape[1])
-    beta_init[0] = statistics.mean(y_final)
+    # Use Y^2 as weights so the residuals are (Y_hat - Y)/Y 
+    weights = np.diag(1/Y)
+    X_w = np.matmul(weights, X)
+    Y_w = np.ones(len(Y))
 
-    result = minimize(loss, beta_init, args=(X, Y), method = 'BFGS', options = {'maxiter': 500})
-    coefs = result.x
+    coefs = np.linalg.lstsq(X_w, Y_w, rcond = None)[0]
 
-    fitted_val = np.matmul(X, np.array(coefs))
-    residuals = y_final - fitted_val
-    r_squared = np.round(np.var(fitted_val) / np.var(y_final), 2)
+    # Build the X row needed to predict last_y
+    last_x = [1] + [0 for i in range(0, n_unique_weekdays)] + [0, 0]
+    last_x[-1] = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
+    last_x[-2] = last_t
+    last_weekday = axes["y_day"][-1]
+    if last_weekday in unique_weekdays:
+        i = 1 + unique_weekdays.index(last_weekday)
+        last_x[i] = 1
 
-    last_y_lag = np.interp(last_t - t_freq, axes["t"][:-1], axes["y"][:-1])
-    E_last_y = float(np.matmul(np.array([1, last_t, last_y_lag]).reshape(1, -1), coefs)[0])
-    delta = E_last_y - last_y
+    E_last_y = np.matmul(last_x, coefs)
+    last_y_mape = (last_y - E_last_y) / last_y
 
-    residuals_smape = 1 + smape(fitted_val, y_final, True)
-    last_y_smape = 1 + float(smape([E_last_y], [last_y], True)[0])
+    # Estimate mape via CV
+    kf = KFold(n_splits = 5)
+    kf.get_n_splits(X)
 
-    r_smape_logval = np.array([math.log(x) for x in residuals_smape])
-    theta = statistics.mean(residuals_smape * r_smape_logval) + statistics.mean(residuals_smape) * statistics.mean(r_smape_logval)
-    k = statistics.mean(residuals_smape)/theta
+    mape = np.zeros(len(Y))
+    for train_index, test_index in kf.split(X):
+        coefs_temp = np.linalg.lstsq(X_w[train_index], Y_w[train_index], rcond = None)[0]
+        fitted_val = np.matmul(X[test_index], coefs_temp)
+        mape[test_index] = (Y[test_index] - fitted_val) / Y[test_index]
 
-    n = len(residuals_smape)
-    theta = (n / (n - 1)) * theta
-    k = k - (1/n)*(3*k - (2/3)*(k/(1+k) - (4/5)*(k/(1+k)**2)))
+    # Obtain cdf value
+    cm_density = np.linspace(start=0, stop=1, num=len(mape))
+    mape.sort()
+    cdf_val = np.interp(last_y_mape, mape, cm_density)
+    # Obtain p-value of last_y_mape mape
+    p_val = round(2*min([1-cdf_val, cdf_val]), 4)
 
-    cdf_value = scipy.stats.gamma.cdf(last_y_smape, k, scale = theta)
-    p_val = round(2*min([cdf_value, 1-cdf_value]), 4)
+    coefs = np.round(coefs, 4)
 
-    res_pred_cor = round(scipy.stats.pearsonr(fitted_val, residuals)[0], 2)
+    model = {"baseline": coefs[0]}
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    days = [days[i] for i in unique_weekdays]
 
-    baseline = round(coefs[0])
-    trend_term = round(coefs[1]*(24*60))
-    lag_term = round(coefs[2], 4)
+    for i in range(0, len(days)):
+        model[days[i]] = coefs[i+1]
+
+    model["daily_trend"] = coefs[-2]
+    model["volume_lagged"] = coefs[-1]
+
+    residuals_distribution = {"type": "Percentage error, estimated with CV = 5", "mean": round(statistics.mean(mape), 4), "sdev": round(statistics.stdev(mape), 4)}
+
+    fitted_val_noCV = np.matmul(X, coefs)
+    residuals_noCV = Y - fitted_val_noCV
+
+    r_squared = round(np.var(fitted_val_noCV) / np.var(Y), 4)
+    res_pred_cor = round(scipy.stats.pearsonr(fitted_val_noCV, residuals_noCV)[0], 4)
     lag_value = np.round(t_freq / (24 * 60), 2) 
     test_result = "FAIL" if p_val <= alpha else "PASS"
-    residuals_distribution = {"type": "Gamma", "shape": round(k, 4), "scale": round(theta, 4)}
+
+    baseline = coefs[0]
+    trend_term = coefs[-2]
+    lag_term = coefs[-1]
 
     last_y = round(last_y)
     E_last_y = round(E_last_y)
+    delta = E_last_y - last_y
 
     print("------ DELTA TIMESERIES TEST RESULT ------")
     print(f"Model r-squared: {r_squared}")
     print(f"Correlation between residuals and fitted values: {res_pred_cor}")
-    print(f"Baseline: {baseline}")
+    print(f"Baseline: {round(baseline)}")
     print(f"Daily trend: {trend_term}")
     print(f"Y lagged term: {lag_term}")
     print(f"Lag (days): {lag_value}")
     print("*****")
-    print(f"Symmetric MAPE+1 residuals distribution: {residuals_distribution}")
+    print(f"Residuals distribution: {residuals_distribution}")
     print(f"Observed volume: {last_y}")
     print(f"Expected volume: {E_last_y}")
+    print(f"Percentage change: {round(100*last_y_mape, 2)} %")
     print(f"p-value: {p_val}")
     print(f"Test alpha: {alpha}")
     print(f"Result: {test_result}")
-    print("------------------------------------------")    
+    print("------------------------------------------")
 
     return {
-        "coefs": {"baseline": baseline, "daily_trend": trend_term, "lagged_value": lag_term},
+        "coefs": model,
         "lag_(days)": lag_value,
         "r_squared": r_squared,
         "fitted_val_and_residuals_correlation": res_pred_cor,
-        "volume": {"observed": last_y, "expected": E_last_y, "delta": delta, "mape": round(delta / last_y, 4)},
+        "volume": {"observed": last_y, "expected": E_last_y, "delta": delta, "delta_percentage": f"{round(100*last_y_mape, 2)} %"},
         "p_value": p_val,
         "test_result": test_result,
         "alpha": alpha,
-        "symmetric_mape+1_residuals_distribution": residuals_distribution,
+        "residuals_distribution": residuals_distribution,
+        "residuals": list(mape),
     }
